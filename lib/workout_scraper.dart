@@ -1,10 +1,23 @@
 import 'package:http/http.dart' as http;
 import 'package:html/parser.dart' as html;
 import 'package:html/dom.dart';
-import 'dart:convert';
 
 class WorkoutScraper {
   static const String _baseUrl = 'https://www.muscleandfitness.com';
+  
+  // Enhanced categories dictionary based on the Python algorithm
+  static const Map<String, List<String>> categories = {
+    "chest": ["bench press", "push up", "fly", "chest press", "incline press", "decline press", "pec deck"],
+    "back": ["pull up", "lat pulldown", "row", "deadlift", "shrug", "hyperextension", "swiss ball hyperextension"],
+    "arms": ["bicep curl", "hammer curl", "tricep extension", "dips", "skullcrusher", "preacher curl"],
+    "legs": ["squat", "lunge", "leg press", "deadlift", "leg curl", "leg extension", "calf raise", "step up"],
+    "shoulders": ["shoulder press", "overhead press", "lateral raise", "front raise", "shrug", "arnold press"],
+    "abs": ["crunch", "plank", "sit up", "leg raise", "russian twist", "bicycle crunch", "mountain climber"],
+    "full_body": ["burpee", "thruster", "clean", "snatch"],
+    "cardio": ["running", "cycling", "rowing", "elliptical", "jump rope", "sprinting", "treadmill"],
+    "functional": ["kettlebell swing", "farmer carry", "sled push", "medicine ball slam"],
+    "other": []
+  };
   
   static Future<Map<String, dynamic>> scrapeWorkout(String url) async {
     try {
@@ -23,8 +36,8 @@ class WorkoutScraper {
           final document = html.parse(response.body);
           print('HTML document parsed successfully');
           
-          // Extract workout information
-          final workoutData = _parseWorkoutData(document);
+          // Extract workout information using improved algorithm
+          final workoutData = _parseWorkoutDataImproved(document);
           print('Workout data extracted: ${workoutData['title']}');
           
           return {
@@ -57,7 +70,7 @@ class WorkoutScraper {
     }
   }
   
-  static Map<String, dynamic> _parseWorkoutData(Document document) {
+  static Map<String, dynamic> _parseWorkoutDataImproved(Document document) {
     // Extract workout title
     final titleElement = document.querySelector('h1');
     final title = titleElement?.text?.trim() ?? 'Scraped Workout';
@@ -66,11 +79,15 @@ class WorkoutScraper {
     final descriptionElement = document.querySelector('p');
     final description = descriptionElement?.text?.trim() ?? '';
     
-    // Parse exercises organized by days
-    final weeklyWorkout = _parseWeeklyWorkout(document);
+    // Use improved extraction algorithm
+    final rawWorkouts = _extractWorkoutsImproved(document);
+    final organizedWorkouts = _classifyExercisesImproved(rawWorkouts);
+    
+    // Convert to weekly workout format
+    final weeklyWorkout = _convertToWeeklyFormat(organizedWorkouts);
     
     // Determine category based on title or content
-    final category = _determineCategory(title, weeklyWorkout['allExercises'] ?? []);
+    final category = _determineCategoryImproved(title, organizedWorkouts);
     
     // Calculate total sets across all days
     final totalSets = weeklyWorkout['totalSets'] ?? 0;
@@ -86,183 +103,211 @@ class WorkoutScraper {
     };
   }
   
-  static Map<String, dynamic> _parseWeeklyWorkout(Document document) {
-    final weeklyWorkout = <String, dynamic>{};
-    final allExercises = <Map<String, dynamic>>[];
-    num totalSets = 0;
+  static List<Map<String, dynamic>> _extractWorkoutsImproved(Document document) {
+    final workouts = <Map<String, dynamic>>[];
     
-    // Try to find day-based workout structure
-    final daySections = _findDaySections(document);
+    // Look for headings and paragraphs/lists (based on Python algorithm)
+    final headings = document.querySelectorAll('h1, h2, h3, h4, h5, h6');
     
-    if (daySections.isNotEmpty) {
-      // Parse structured weekly workout
-      for (final daySection in daySections) {
-        final dayName = daySection['day'];
-        final exercises = daySection['exercises'];
-        
-        weeklyWorkout[dayName] = {
-          'day': dayName,
-          'exercises': exercises,
-          'totalSets': exercises.fold<int>(0, (int sum, Map<String, dynamic> e) => sum + ((e['sets'] as int?) ?? 0)),
-          'duration': _estimateWorkoutDuration(exercises),
-        };
-        
-        allExercises.addAll(exercises);
-        totalSets += exercises.fold<int>(0, (int sum, Map<String, dynamic> e) => sum + ((e['sets'] as int?) ?? 0));
-      }
-    } else {
-      // If no day structure found, organize exercises into a single day
-      final exercises = _parseExercises(document);
-      weeklyWorkout['Day 1'] = {
-        'day': 'Day 1',
-        'exercises': exercises,
-        'totalSets': exercises.fold<int>(0, (int sum, Map<String, dynamic> e) => sum + ((e['sets'] as int?) ?? 0)),
-        'duration': _estimateWorkoutDuration(exercises),
-      };
+    for (final heading in headings) {
+      final headingText = heading.text?.trim() ?? '';
+      final exercises = <String>[];
       
-      allExercises.addAll(exercises);
-      totalSets = exercises.fold<int>(0, (int sum, Map<String, dynamic> e) => sum + ((e['sets'] as int?) ?? 0));
+      // Capture nearby exercises (e.g., lists or paragraphs after heading)
+      Element? sibling = heading.nextElementSibling;
+      while (sibling != null && !RegExp(r'^h[1-6]$', caseSensitive: false).hasMatch(sibling.localName ?? '')) {
+        if (sibling.localName == 'p' || sibling.localName == 'li') {
+          final text = sibling.text?.trim() ?? '';
+          if (text.isNotEmpty && text.length > 2) {
+            exercises.add(text);
+          }
+        }
+        sibling = sibling.nextElementSibling;
+      }
+      
+      if (exercises.isNotEmpty) {
+        workouts.add({
+          'day_or_category': headingText,
+          'exercises': exercises,
+        });
+      }
     }
     
-    weeklyWorkout['allExercises'] = allExercises;
-    weeklyWorkout['totalSets'] = totalSets.toInt();
-    weeklyWorkout['totalDays'] = weeklyWorkout.keys.where((key) => key.startsWith('Day')).length;
+    // Fallback: no headings, just grab list items or paragraphs
+    if (workouts.isEmpty) {
+      final rawExercises = <String>[];
+      final elements = document.querySelectorAll('li, p');
+      
+      for (final element in elements) {
+        final text = element.text?.trim() ?? '';
+        if (text.isNotEmpty && text.length > 2) {
+          rawExercises.add(text);
+        }
+      }
+      
+      if (rawExercises.isNotEmpty) {
+        workouts.add({
+          'day_or_category': 'Uncategorized',
+          'exercises': rawExercises,
+        });
+      }
+    }
     
-    return weeklyWorkout;
+    return workouts;
   }
   
-  static List<Map<String, dynamic>> _findDaySections(Document document) {
-    final daySections = <Map<String, dynamic>>[];
+  static Map<String, List<String>> _classifyExercisesImproved(List<Map<String, dynamic>> workouts) {
+    final categorized = <String, List<String>>{};
     
-    // Look for day headers in various formats
-    final dayPatterns = [
-      RegExp(r'(monday|tuesday|wednesday|thursday|friday|saturday|sunday)', caseSensitive: false),
-      RegExp(r'(day\s*\d+)', caseSensitive: false),
-      RegExp(r'(workout\s*\d+)', caseSensitive: false),
-    ];
-    
-    // Find all text elements that might contain day information
-    final textElements = document.querySelectorAll('h1, h2, h3, h4, h5, h6, p, div');
-    
-    for (final element in textElements) {
-      final text = element.text.toLowerCase().trim();
+    for (final block in workouts) {
+      final category = (block['day_or_category'] as String).toLowerCase();
       
-      for (final pattern in dayPatterns) {
-        final match = pattern.firstMatch(text);
-        if (match != null) {
-          final dayName = _normalizeDayName(match.group(1) ?? '');
-          final exercises = _extractExercisesFromSection(element);
+      // If looks like Day1/Day2 → keep as is
+      if (RegExp(r'day\s*\d+', caseSensitive: false).hasMatch(category)) {
+        categorized[block['day_or_category']] = List<String>.from(block['exercises']);
+      } else {
+        // Otherwise classify by exercise content
+        for (final exercise in block['exercises']) {
+          bool matched = false;
+          final exerciseLower = exercise.toLowerCase();
           
-          if (exercises.isNotEmpty) {
-            daySections.add({
-              'day': dayName,
-              'exercises': exercises,
-            });
+          for (final entry in categories.entries) {
+            final cat = entry.key;
+            final keywords = entry.value;
+            
+            if (keywords.any((keyword) => exerciseLower.contains(keyword))) {
+              categorized.putIfAbsent(cat, () => <String>[]);
+              categorized[cat]!.add(exercise);
+              matched = true;
+              break;
+            }
+          }
+          
+          if (!matched) {
+            categorized.putIfAbsent('other', () => <String>[]);
+            categorized['other']!.add(exercise);
           }
         }
       }
     }
     
-    // If no structured days found, try to split exercises into logical days
-    if (daySections.isEmpty) {
-      final allExercises = _parseExercises(document);
-      if (allExercises.length > 8) {
-        // Split into multiple days
-        final exercisesPerDay = (allExercises.length / 3).ceil();
-        for (int i = 0; i < allExercises.length; i += exercisesPerDay) {
-          final dayExercises = allExercises.skip(i).take(exercisesPerDay).toList();
-          daySections.add({
-            'day': 'Day ${(i ~/ exercisesPerDay) + 1}',
-            'exercises': dayExercises,
-          });
-        }
-      }
-    }
-    
-    return daySections;
+    return categorized;
   }
   
-  static String _normalizeDayName(String dayText) {
-    final day = dayText.toLowerCase().trim();
+  static Map<String, dynamic> _convertToWeeklyFormat(Map<String, List<String>> organizedWorkouts) {
+    final weeklyWorkout = <String, dynamic>{};
+    final allExercises = <Map<String, dynamic>>[];
+    int totalSets = 0;
     
-    if (day.contains('monday')) return 'Monday';
-    if (day.contains('tuesday')) return 'Tuesday';
-    if (day.contains('wednesday')) return 'Wednesday';
-    if (day.contains('thursday')) return 'Thursday';
-    if (day.contains('friday')) return 'Friday';
-    if (day.contains('saturday')) return 'Saturday';
-    if (day.contains('sunday')) return 'Sunday';
-    
-    // Handle day numbers
-    final dayMatch = RegExp(r'day\s*(\d+)', caseSensitive: false).firstMatch(day);
-    if (dayMatch != null) {
-      return 'Day ${dayMatch.group(1)}';
-    }
-    
-    // Handle workout numbers
-    final workoutMatch = RegExp(r'workout\s*(\d+)', caseSensitive: false).firstMatch(day);
-    if (workoutMatch != null) {
-      return 'Workout ${workoutMatch.group(1)}';
-    }
-    
-    return 'Day 1';
-  }
-  
-  static List<Map<String, dynamic>> _extractExercisesFromSection(Element section) {
-    final exercises = <Map<String, dynamic>>[];
-    
-    // Look for exercise patterns in the section
-    final exerciseElements = section.querySelectorAll('li, p, div');
-    
-    for (final element in exerciseElements) {
-      final text = element.text.trim();
-      if (_isExerciseText(text)) {
-        final exercise = _parseExerciseFromText(text);
+    // Convert categorized exercises to structured workout format
+    for (final entry in organizedWorkouts.entries) {
+      final dayName = entry.key;
+      final exerciseTexts = entry.value;
+      
+      final exercises = <Map<String, dynamic>>[];
+      for (final exerciseText in exerciseTexts) {
+        final exercise = _parseExerciseFromTextImproved(exerciseText);
         if (exercise['name'].toString().isNotEmpty) {
           exercises.add(exercise);
         }
       }
+      
+      if (exercises.isNotEmpty) {
+        final daySets = exercises.fold<int>(0, (sum, e) => sum + ((e['sets'] as int?) ?? 0));
+        weeklyWorkout[dayName] = {
+          'day': dayName,
+          'exercises': exercises,
+          'totalSets': daySets,
+          'duration': _estimateWorkoutDuration(exercises),
+        };
+        
+        allExercises.addAll(exercises);
+        totalSets += daySets;
+      }
     }
     
-    return exercises;
+    // If no structured days found, organize into logical days
+    if (weeklyWorkout.isEmpty && allExercises.isNotEmpty) {
+      final exercisesPerDay = (allExercises.length / 3).ceil();
+      for (int i = 0; i < allExercises.length; i += exercisesPerDay) {
+        final dayExercises = allExercises.skip(i).take(exercisesPerDay).toList();
+        final dayName = 'Day ${(i ~/ exercisesPerDay) + 1}';
+        final daySets = dayExercises.fold<int>(0, (sum, e) => sum + ((e['sets'] as int?) ?? 0));
+        
+        weeklyWorkout[dayName] = {
+          'day': dayName,
+          'exercises': dayExercises,
+          'totalSets': daySets,
+          'duration': _estimateWorkoutDuration(dayExercises),
+        };
+      }
+    }
+    
+    weeklyWorkout['allExercises'] = allExercises;
+    weeklyWorkout['totalSets'] = totalSets;
+    weeklyWorkout['totalDays'] = weeklyWorkout.keys.where((key) => key.startsWith('Day') || key.contains('day')).length;
+    
+    return weeklyWorkout;
   }
   
-  static bool _isExerciseText(String text) {
-    if (text.length < 5) return false;
-    
-    // Common exercise keywords
-    final exerciseKeywords = [
-      'press', 'squat', 'deadlift', 'curl', 'row', 'pull', 'push',
-      'lunge', 'raise', 'dip', 'fly', 'extension', 'crunch', 'plank'
-    ];
-    
-    final lowerText = text.toLowerCase();
-    return exerciseKeywords.any((keyword) => lowerText.contains(keyword));
-  }
-  
-  static Map<String, dynamic> _parseExerciseFromText(String text) {
+  static Map<String, dynamic> _parseExerciseFromTextImproved(String text) {
     final exercise = <String, dynamic>{};
     
     // Extract exercise name (usually the first part)
-    final nameMatch = RegExp(r'^([^0-9]+?)(?:\s+\d+|\s*$)').firstMatch(text);
+    final nameMatch = RegExp(r'^([^0-9]+?)(?:\s+\d+|\s*$)', caseSensitive: false).firstMatch(text);
     exercise['name'] = nameMatch?.group(1)?.trim() ?? text;
     
-    // Extract sets and reps
-    final setsReps = _parseSetsAndReps(text);
+    // Extract sets and reps with improved parsing
+    final setsReps = _parseSetsAndRepsImproved(text);
     exercise['sets'] = setsReps['sets'];
     exercise['reps'] = setsReps['reps'];
     
     // Try to extract equipment
-    final equipment = _extractEquipment(text);
+    final equipment = _extractEquipmentImproved(text);
     exercise['equipment'] = equipment;
     
     return exercise;
   }
   
-  static String _extractEquipment(String text) {
+  static Map<String, int> _parseSetsAndRepsImproved(String text) {
+    // Enhanced parsing for various formats
+    final patterns = [
+      RegExp(r'(\d+)\s*x\s*(\d+)', caseSensitive: false), // 3x10
+      RegExp(r'(\d+)\s*sets?\s*[,\-]\s*(\d+)\s*reps?', caseSensitive: false), // 3 sets, 10 reps
+      RegExp(r'(\d+)\s*reps?\s*[,\-]\s*(\d+)\s*sets?', caseSensitive: false), // 10 reps, 3 sets
+      RegExp(r'(\d+)\s*sets?', caseSensitive: false), // just sets
+      RegExp(r'(\d+)\s*reps?', caseSensitive: false), // just reps
+    ];
+    
+    int sets = 3; // Default
+    int reps = 10; // Default
+    
+    for (final pattern in patterns) {
+      final match = pattern.firstMatch(text);
+      if (match != null) {
+        if (match.groupCount >= 2) {
+          sets = int.tryParse(match.group(1) ?? '3') ?? 3;
+          reps = int.tryParse(match.group(2) ?? '10') ?? 10;
+          break;
+        } else if (match.groupCount == 1) {
+          final value = int.tryParse(match.group(1) ?? '') ?? 0;
+          if (text.toLowerCase().contains('set')) {
+            sets = value;
+          } else if (text.toLowerCase().contains('rep')) {
+            reps = value;
+          }
+        }
+      }
+    }
+    
+    return {'sets': sets, 'reps': reps};
+  }
+  
+  static String _extractEquipmentImproved(String text) {
     final equipmentKeywords = [
       'barbell', 'dumbbell', 'cable', 'machine', 'bench', 'rack',
-      'smith', 'kettlebell', 'resistance band', 'bodyweight'
+      'smith', 'kettlebell', 'resistance band', 'bodyweight', 'ez-bar',
+      'preacher bench', 'dip station', 'leg press machine', 'box'
     ];
     
     final lowerText = text.toLowerCase();
@@ -489,5 +534,47 @@ class WorkoutScraper {
       'source': 'Muscle & Fitness',
       'isWeeklyPlan': true,
     };
+  }
+
+  static String _determineCategoryImproved(String title, Map<String, List<String>> organizedWorkouts) {
+    final titleLower = title.toLowerCase();
+    
+    // Check title first
+    if (titleLower.contains('thor') || titleLower.contains('god')) {
+      return 'Full Body';
+    }
+    
+    // Check organized workouts for dominant category
+    String dominantCategory = 'Full Body';
+    int maxExercises = 0;
+    
+    for (final entry in organizedWorkouts.entries) {
+      if (entry.value.length > maxExercises) {
+        maxExercises = entry.value.length;
+        dominantCategory = entry.key;
+      }
+    }
+    
+    // Convert category names to display format
+    switch (dominantCategory.toLowerCase()) {
+      case 'chest':
+        return 'Chest';
+      case 'back':
+        return 'Back';
+      case 'legs':
+        return 'Legs';
+      case 'arms':
+        return 'Arms';
+      case 'shoulders':
+        return 'Shoulders';
+      case 'abs':
+        return 'Abs';
+      case 'cardio':
+        return 'Cardio';
+      case 'functional':
+        return 'Functional';
+      default:
+        return 'Full Body';
+    }
   }
 } 
