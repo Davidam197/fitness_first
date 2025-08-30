@@ -76,14 +76,38 @@ class WorkoutScraper {
     final descriptionElement = document.querySelector('p');
     final description = descriptionElement?.text?.trim() ?? '';
     
-    // Use the new Thor workout extraction algorithm
-    final workoutData = _extractThorWorkout(document);
+    // Try different extraction strategies in order of preference
+    Map<String, List<Map<String, dynamic>>> workoutData;
+    String extractionMethod = 'fallback';
+    
+    // Strategy 1: Thor-style workout extraction (Day-based structure)
+    workoutData = _extractThorWorkout(document);
+    if (workoutData.isNotEmpty) {
+      extractionMethod = 'thor_style';
+    } else {
+      // Strategy 2: Generic workout extraction (heading-based structure)
+      workoutData = _extractGenericWorkout(document);
+      if (workoutData.isNotEmpty) {
+        extractionMethod = 'generic_heading';
+      } else {
+        // Strategy 3: List-based extraction (fallback)
+        workoutData = _extractListBasedWorkout(document);
+        if (workoutData.isNotEmpty) {
+          extractionMethod = 'list_based';
+        } else {
+          // Strategy 4: Default Thor workout
+          final defaultData = _getDefaultThorWorkoutData()['weeklyWorkout'] as Map<String, dynamic>;
+          workoutData = _convertDefaultToWorkoutData(defaultData);
+          extractionMethod = 'default';
+        }
+      }
+    }
     
     // Convert to weekly workout format
-    final weeklyWorkout = _convertThorDataToWeeklyFormat(workoutData);
+    final weeklyWorkout = _convertToUniversalFormat(workoutData, extractionMethod);
     
     // Determine category based on title or content
-    final category = _determineCategoryFromThorData(title, workoutData);
+    final category = _determineCategoryUniversal(title, workoutData);
     
     // Calculate total sets across all days
     final totalSets = weeklyWorkout['totalSets'] ?? 0;
@@ -94,8 +118,9 @@ class WorkoutScraper {
       'category': category,
       'weeklyWorkout': weeklyWorkout,
       'totalSets': totalSets,
-      'source': 'Muscle & Fitness',
+      'source': 'Dynamic Scraper',
       'isWeeklyPlan': true,
+      'extractionMethod': extractionMethod,
     };
   }
   
@@ -141,12 +166,205 @@ class WorkoutScraper {
     return 'other';
   }
   
-  static Map<String, dynamic> _convertThorDataToWeeklyFormat(Map<String, List<Map<String, dynamic>>> workoutData) {
+  static Map<String, List<Map<String, dynamic>>> _extractGenericWorkout(Document document) {
+    final data = <String, List<Map<String, dynamic>>>{};
+    
+    // Look for various heading patterns that might indicate workout sections
+    final headingPatterns = [
+      RegExp(r'(monday|tuesday|wednesday|thursday|friday|saturday|sunday)', caseSensitive: false),
+      RegExp(r'(day\s*\d+)', caseSensitive: false),
+      RegExp(r'(workout\s*\d+)', caseSensitive: false),
+      RegExp(r'(chest|back|legs|arms|shoulders|abs)', caseSensitive: false),
+      RegExp(r'(push|pull|upper|lower)', caseSensitive: false),
+    ];
+    
+    final headings = document.querySelectorAll('h1, h2, h3, h4, h5, h6');
+    
+    for (final heading in headings) {
+      final headingText = heading.text?.trim() ?? '';
+      if (headingText.isEmpty) continue;
+      
+      // Check if this heading matches any of our patterns
+      bool isWorkoutSection = false;
+      String sectionName = headingText;
+      
+      for (final pattern in headingPatterns) {
+        final match = pattern.firstMatch(headingText.toLowerCase());
+        if (match != null) {
+          isWorkoutSection = true;
+          sectionName = _normalizeSectionName(headingText);
+          break;
+        }
+      }
+      
+      if (isWorkoutSection) {
+        final exercises = _extractExercisesFromSection(heading);
+        if (exercises.isNotEmpty) {
+          data[sectionName] = exercises;
+        }
+      }
+    }
+    
+    return data;
+  }
+  
+  static String _normalizeSectionName(String name) {
+    final lowerName = name.toLowerCase();
+    
+    // Normalize day names
+    if (lowerName.contains('monday')) return 'Monday';
+    if (lowerName.contains('tuesday')) return 'Tuesday';
+    if (lowerName.contains('wednesday')) return 'Wednesday';
+    if (lowerName.contains('thursday')) return 'Thursday';
+    if (lowerName.contains('friday')) return 'Friday';
+    if (lowerName.contains('saturday')) return 'Saturday';
+    if (lowerName.contains('sunday')) return 'Sunday';
+    
+    // Normalize day numbers
+    final dayMatch = RegExp(r'day\s*(\d+)', caseSensitive: false).firstMatch(lowerName);
+    if (dayMatch != null) {
+      return 'Day ${dayMatch.group(1)}';
+    }
+    
+    // Normalize workout numbers
+    final workoutMatch = RegExp(r'workout\s*(\d+)', caseSensitive: false).firstMatch(lowerName);
+    if (workoutMatch != null) {
+      return 'Workout ${workoutMatch.group(1)}';
+    }
+    
+    // Normalize muscle groups
+    if (lowerName.contains('chest')) return 'Chest';
+    if (lowerName.contains('back')) return 'Back';
+    if (lowerName.contains('legs')) return 'Legs';
+    if (lowerName.contains('arms')) return 'Arms';
+    if (lowerName.contains('shoulders')) return 'Shoulders';
+    if (lowerName.contains('abs')) return 'Abs';
+    if (lowerName.contains('push')) return 'Push';
+    if (lowerName.contains('pull')) return 'Pull';
+    if (lowerName.contains('upper')) return 'Upper Body';
+    if (lowerName.contains('lower')) return 'Lower Body';
+    
+    return name;
+  }
+  
+  static List<Map<String, dynamic>> _extractExercisesFromSection(Element section) {
+    final exercises = <Map<String, dynamic>>[];
+    
+    // Look for exercises in various formats after the heading
+    Element? current = section.nextElementSibling;
+    while (current != null && !_isNewSection(current)) {
+      if (_isExerciseElement(current)) {
+        final exerciseText = current.text?.trim() ?? '';
+        if (exerciseText.isNotEmpty && _isExerciseText(exerciseText)) {
+          final category = _classifyExercise(exerciseText);
+          exercises.add({
+            'exercise': exerciseText,
+            'category': category,
+          });
+        }
+      }
+      current = current.nextElementSibling;
+    }
+    
+    return exercises;
+  }
+  
+  static bool _isNewSection(Element element) {
+    final tagName = element.localName?.toLowerCase() ?? '';
+    return tagName.startsWith('h') && int.tryParse(tagName.substring(1)) != null;
+  }
+  
+  static bool _isExerciseElement(Element element) {
+    final tagName = element.localName?.toLowerCase() ?? '';
+    return tagName == 'li' || tagName == 'p' || tagName == 'div';
+  }
+  
+  static bool _isExerciseText(String text) {
+    if (text.length < 5) return false;
+    
+    // Common exercise keywords
+    final exerciseKeywords = [
+      'press', 'squat', 'deadlift', 'curl', 'row', 'pull', 'push',
+      'lunge', 'raise', 'dip', 'fly', 'extension', 'crunch', 'plank',
+      'bench', 'dumbbell', 'barbell', 'machine', 'cable'
+    ];
+    
+    final lowerText = text.toLowerCase();
+    return exerciseKeywords.any((keyword) => lowerText.contains(keyword));
+  }
+  
+  static Map<String, List<Map<String, dynamic>>> _extractListBasedWorkout(Document document) {
+    final data = <String, List<Map<String, dynamic>>>{};
+    
+    // Look for lists (ul, ol) that might contain exercises
+    final lists = document.querySelectorAll('ul, ol');
+    
+    for (final list in lists) {
+      final listItems = list.querySelectorAll('li');
+      final exercises = <Map<String, dynamic>>[];
+      
+      for (final item in listItems) {
+        final text = item.text?.trim() ?? '';
+        if (text.isNotEmpty && _isExerciseText(text)) {
+          final category = _classifyExercise(text);
+          exercises.add({
+            'exercise': text,
+            'category': category,
+          });
+        }
+      }
+      
+      if (exercises.isNotEmpty) {
+        // Try to find a heading before this list
+        Element? previous = list.previousElementSibling;
+        String sectionName = 'Workout';
+        
+        while (previous != null) {
+          final tagName = previous.localName?.toLowerCase() ?? '';
+          if (tagName.startsWith('h') && int.tryParse(tagName.substring(1)) != null) {
+            final headingText = previous.text?.trim() ?? '';
+            if (headingText.isNotEmpty) {
+              sectionName = _normalizeSectionName(headingText);
+              break;
+            }
+          }
+          previous = previous.previousElementSibling;
+        }
+        
+        data[sectionName] = exercises;
+      }
+    }
+    
+    // If no structured lists found, look for paragraphs with exercise patterns
+    if (data.isEmpty) {
+      final paragraphs = document.querySelectorAll('p');
+      final exercises = <Map<String, dynamic>>[];
+      
+      for (final p in paragraphs) {
+        final text = p.text?.trim() ?? '';
+        if (text.isNotEmpty && _isExerciseText(text)) {
+          final category = _classifyExercise(text);
+          exercises.add({
+            'exercise': text,
+            'category': category,
+          });
+        }
+      }
+      
+      if (exercises.isNotEmpty) {
+        data['Workout'] = exercises;
+      }
+    }
+    
+    return data;
+  }
+  
+  static Map<String, dynamic> _convertToUniversalFormat(Map<String, List<Map<String, dynamic>>> workoutData, String extractionMethod) {
     final weeklyWorkout = <String, dynamic>{};
     final allExercises = <Map<String, dynamic>>[];
     int totalSets = 0;
     
-    // Convert Thor workout data to structured format
+    // Convert workout data to structured format (works for all extraction methods)
     for (final entry in workoutData.entries) {
       final dayName = entry.key;
       final exercises = entry.value;
@@ -489,12 +707,56 @@ class WorkoutScraper {
     };
   }
 
-  static String _determineCategoryFromThorData(String title, Map<String, List<Map<String, dynamic>>> workoutData) {
+  static Map<String, List<Map<String, dynamic>>> _convertDefaultToWorkoutData(Map<String, dynamic> defaultData) {
+    final workoutData = <String, List<Map<String, dynamic>>>{};
+    
+    for (final entry in defaultData.entries) {
+      if (entry.key == 'allExercises') continue;
+      if (entry.key == 'totalSets') continue;
+      if (entry.key == 'totalDays') continue;
+      
+      final dayData = entry.value as Map<String, dynamic>;
+      final exercises = dayData['exercises'] as List<dynamic>;
+      
+      final convertedExercises = <Map<String, dynamic>>[];
+      for (final exercise in exercises) {
+        final exerciseMap = exercise as Map<String, dynamic>;
+        convertedExercises.add({
+          'exercise': exerciseMap['name'] as String,
+          'category': _classifyExercise(exerciseMap['name'] as String),
+        });
+      }
+      
+      workoutData[entry.key] = convertedExercises;
+    }
+    
+    return workoutData;
+  }
+  
+  static String _determineCategoryUniversal(String title, Map<String, List<Map<String, dynamic>>> workoutData) {
     final titleLower = title.toLowerCase();
     
-    // Check title first
+    // Check title first for specific workout types
     if (titleLower.contains('thor') || titleLower.contains('god')) {
       return 'Full Body';
+    }
+    if (titleLower.contains('chest') || titleLower.contains('push')) {
+      return 'Chest';
+    }
+    if (titleLower.contains('back') || titleLower.contains('pull')) {
+      return 'Back';
+    }
+    if (titleLower.contains('leg') || titleLower.contains('squat')) {
+      return 'Legs';
+    }
+    if (titleLower.contains('arm') || titleLower.contains('bicep') || titleLower.contains('tricep')) {
+      return 'Arms';
+    }
+    if (titleLower.contains('shoulder') || titleLower.contains('deltoid')) {
+      return 'Shoulders';
+    }
+    if (titleLower.contains('abs') || titleLower.contains('core')) {
+      return 'Abs';
     }
     
     // Count exercises by category across all days
